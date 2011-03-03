@@ -21,6 +21,8 @@ our $VERSION = '0.42';
 use Any::Moose;
 use boolean;
 use Tie::IxHash;
+use Data::Dumper;
+use Devel::Peek;
 
 =head1 NAME
 
@@ -432,10 +434,17 @@ sub count {
         $cmd->Push(skip => $self->_skip) if $self->_skip;
     }
 
+    print "using [$db]\n";
     my $result = $self->_connection->get_database($db)->run_command($cmd);
+    print "command: [".Dumper($cmd)."]\n";
+    print "result: [".Dumper($result)."]\n";
+    Dump($result);
 
     # returns "ns missing" if collection doesn't exist
+    print "returning 0 if not hash: ".(ref $result).".\n";
     return 0 unless ref $result eq 'HASH';
+    print "returning n.\n";
+    Dump($result->{'n'});
     return $result->{'n'};
 }
 
