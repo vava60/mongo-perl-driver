@@ -460,45 +460,140 @@ sub read_preference {
     }
 }
 
+sub _choose_secondary {
+    my ($self, $servers) = @_;
 
-sub _ping {
-    my ($self) = @_;
-    return $self->get_database('admin')->run_command({ping => 1});
+    my @secondaries = keys %{$servers};
+    if (@secondaries == 0) {
+        return undef;
+    }
+    else {
+        return $servers->{$secondaries[int(rand(scalar @secondaries))]};
+    }
+}
+
+
+sub _choose_pin {
+    my ($self, $servers) = @_;
+
+    my $mode = $self->_readpref_mode;
+    my $primary = $self->_master->host;
+
+    # pin the primary or die
+    if ($mode == MongoDB::MongoClient->PRIMARY) {
+        if (exists $servers->{$primary}) {
+            return $servers->{$primary};
+        }
+        else {
+            die "No replica set primary available for query with read_preference PRIMARY";
+        }
+    }
+
+    # pin an arbitrary secondary or die
+    elsif ($mode == MongoDB::MongoClient->SECONDARY) {
+        print "secondary\n";
+        delete $servers->{$primary};
+        my $secondary = $self->_choose_secondary($servers);
+        if (!$secondary) {
+            die "No replica set secondary available for query with read_preference SECONDARY";
+        }
+        return $secondary;
+    }
+
+    # if no primary available, then pin the secondary
+    elsif ($mode == MongoDB::MongoClient->PRIMARY_PREFERRED) {
+        print "primary_preferred\n";
+        if (exists $servers->{$primary}) {
+            return $servers->{$primary};
+        }
+        else {
+            my $secondary = $self->_choose_secondary($servers);
+            if (!$secondary) {
+                die "No replica set member available";
+            }
+            return $secondary;
+        }
+    }
+
+    # if no secondary available, then pin the primary
+    elsif ($mode == MongoDB::MongoClient->SECONDARY_PREFERRED) {
+        print "secondary_preferred\n";
+
+        delete $servers->{$primary};
+        my $secondary = $self->_choose_secondary($servers);
+        if ($secondary) {
+            return $secondary;
+        }
+        else {
+            return $self->_master; 
+        }
+    }
+
+    # other read preference modes are not supported
+    else {
+        die "TODO: fix this";
+    }
+}
+
+
+sub _narrow_by_tagsets {
+    my ($self, $servers) = @_;
+
+    return unless $self->_readpref_tagsets;
+
+    my $conn = $self->_get_any_connection();
+
+    my $replcoll = $conn->get_database('local')->get_collection('system.replset');
+    my $rsconf = $replcoll->find_one();
+
+    foreach my $conf (@{$rsconf->{'members'}}) {
+        next unless exists $conf->{'tags'};
+
+        my $member_matches = 0;
+
+        # see if any of the tagsets match the rs conf
+        TAGSET:
+        foreach my $tagset (@{$self->_readpref_tagsets}) {
+
+            foreach my $tagkey (keys %{$tagset}) {
+                next TAGSET unless exists $conf->{'tags'}->{$tagkey} &&
+                                   $tagset->{$tagkey} eq $conf->{'tags'}->{$tagkey};
+            }
+
+            $member_matches = 1;
+        }
+
+        # eliminate non-matching RS members
+        delete $servers->{'mongodb://' . $conf->{'host'}} unless $member_matches;
+    }
 }
 
 
 sub _repin {
     my ($self) = @_;
-    my $mode = $self->_readpref_mode;
 
     if ($self->_is_mongos) {
         $self->_readpref_pinned($self->_master);
         return;
     }
 
-    my $primary = $self->_master->host;
     my %servers = %{$self->_servers};
+    $self->_narrow_by_tagsets(\%servers);
 
-    # TODO actual selection logic
-    if ($mode == MongoDB::MongoClient->PRIMARY) {
-        $self->_readpref_pinned($self->_master);
+    foreach (1 .. $self->_readpref_retries) {
+        print "looping... $_\n";
+        my $to_pin = $self->_choose_pin(\%servers);
+        my $status = $self->get_database('admin')->run_command({ping => 1});
+        if ($status->{'ok'}) {
+            $self->_readpref_pinned($to_pin);
+            return;
+        }
+        else {
+            delete $servers{$to_pin->host};
+        }
     }
-    elsif ($mode == MongoDB::MongoClient->SECONDARY) {
-        print "secondary\n";
-        delete $servers{$primary};
-        my @secondaries = keys %servers;
-        my $pin_server = $servers{$secondaries[int(rand(scalar @secondaries))]};
-        $self->_readpref_pinned($pin_server);
-    }
-    elsif ($mode == MongoDB::MongoClient->PRIMARY_PREFERRED) {
-        print "primary_preferred\n";
-    }
-    elsif ($mode == MongoDB::MongoClient->SECONDARY_PREFERRED) {
-        print "secondary_preferred\n";
-    }
-    else {
-        die "TODO: fix this";
-    }
+
+    die "No replica set members available for query";
 }
 
 sub authenticate {
