@@ -449,15 +449,19 @@ sub get_master {
 sub read_preference {
     my ($self, $mode, $tagsets) = @_;
 
-    die "Missing read preference mode\n" if @_ < 2;
-    die "Unrecognized read preference mode: $mode\n" if $mode < 0 || $mode > 4;
-    die "NEAREST read preference mode not supported\n" if $mode == MongoDB::MongoClient->NEAREST;
+    die "Missing read preference mode" if @_ < 2;
+    die "Unrecognized read preference mode: $mode" if $mode < 0 || $mode > 4;
+    die "NEAREST read preference mode not supported" if $mode == MongoDB::MongoClient->NEAREST; 
+    die "Read preference must be used with a replica set" if !$self->find_master || keys %{$self->_servers} < 2;
+    die "PRIMARY cannot be combined with tags" if $mode == MongoDB::MongoClient->PRIMARY && $tagsets;
 
-    if ($self->_readpref_mode != $mode || $self->_readpref_tagsets != $tagsets) {
-        $self->_readpref_mode($mode);
-        $self->clear__readpref_tagsets() if !(defined $tagsets);
-        $self->_repin();
-    }
+    $self->_readpref_mode($mode);
+
+    $self->_readpref_tagsets($tagsets) if defined $tagsets;
+    $self->_readpref_tagsets([]) if !(defined $tagsets);
+
+    # TODO: only repin when mode or tagsets change
+    $self->_repin();
 }
 
 sub _choose_secondary {
@@ -491,7 +495,6 @@ sub _choose_pin {
 
     # pin an arbitrary secondary or die
     elsif ($mode == MongoDB::MongoClient->SECONDARY) {
-        print "secondary\n";
         delete $servers->{$primary};
         my $secondary = $self->_choose_secondary($servers);
         if (!$secondary) {
@@ -502,7 +505,6 @@ sub _choose_pin {
 
     # if no primary available, then pin the secondary
     elsif ($mode == MongoDB::MongoClient->PRIMARY_PREFERRED) {
-        print "primary_preferred\n";
         if (exists $servers->{$primary}) {
             return $servers->{$primary};
         }
@@ -517,8 +519,6 @@ sub _choose_pin {
 
     # if no secondary available, then pin the primary
     elsif ($mode == MongoDB::MongoClient->SECONDARY_PREFERRED) {
-        print "secondary_preferred\n";
-
         delete $servers->{$primary};
         my $secondary = $self->_choose_secondary($servers);
         if ($secondary) {
@@ -539,7 +539,7 @@ sub _choose_pin {
 sub _narrow_by_tagsets {
     my ($self, $servers) = @_;
 
-    return unless $self->_readpref_tagsets;
+    return unless @{$self->_readpref_tagsets};
 
     my $conn = $self->_get_any_connection();
 
@@ -573,17 +573,21 @@ sub _repin {
     my ($self) = @_;
 
     if ($self->_is_mongos) {
-        $self->_readpref_pinned($self->_master);
+        $self->_readpref_pinned($self);
         return;
     }
 
     my %servers = %{$self->_servers};
+    foreach (keys %servers) {
+        my $value = $servers{$_};
+        delete $servers{$_};
+        $servers{"mongodb://$_"} = $value;
+    }
     $self->_narrow_by_tagsets(\%servers);
 
     foreach (1 .. $self->_readpref_retries) {
-        print "looping... $_\n";
         my $to_pin = $self->_choose_pin(\%servers);
-        my $status = $self->get_database('admin')->run_command({ping => 1});
+        my $status = $to_pin->get_database('admin')->run_command({ping => 1});
         if ($status->{'ok'}) {
             $self->_readpref_pinned($to_pin);
             return;

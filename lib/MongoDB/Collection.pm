@@ -110,8 +110,18 @@ sub find {
     $limit   ||= 0;
     $skip    ||= 0;
 
+    # choose pinned connection is read preferences have
+    # been set
+    my $conn;
+    my $client = $self->_database->_client;
+    if (!$client->_readpref_pinned) {
+        $conn = $client;
+    }
+    else {
+        $conn = $client->_readpref_pinned;
+    }
+
     my $q = $query || {};
-    my $conn = $self->_database->_client;
     my $ns = $self->full_name;
     my $cursor = MongoDB::Cursor->new(
 	_client => $conn,
