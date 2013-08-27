@@ -30,6 +30,14 @@ use Scalar::Util 'reftype';
 use boolean;
 use Encode;
 
+use constant {
+    PRIMARY             => 0,
+    SECONDARY           => 1,
+    PRIMARY_PREFERRED   => 2,
+    SECONDARY_PREFERRED => 3,
+    NEAREST             => 4
+};
+
 has host => (
     is       => 'ro',
     isa      => 'Str',
@@ -53,6 +61,32 @@ has j => (
     is      => 'rw',
     isa     => 'Bool',
     default => 0
+);
+
+
+has _readpref_mode => (
+    is      => 'rw',
+    isa     => 'Int',
+    default => MongoDB::MongoClient->PRIMARY
+);
+
+has _readpref_tagsets => (
+    is       => 'rw',
+    isa      => 'ArrayRef',
+    required => 0
+);
+
+has _readpref_pinned => (
+    is       => 'rw',
+    isa      => 'MongoDB::MongoClient',
+    required => 0
+);
+
+has _readpref_retries => (
+    is       => 'ro',
+    isa      => 'Int',
+    required => 1,
+    default  => 3
 );
 
 
@@ -123,6 +157,13 @@ has find_master => (
     isa      => 'Bool',
     required => 1,
     default  => 0,
+);
+
+has _is_mongos => (
+    is       => 'rw',
+    isa      => 'Bool',
+    required => 1,
+    default  => 0
 );
 
 
@@ -361,6 +402,9 @@ sub get_master {
             return -1;
         }
 
+        # determine whether connected to mongos
+        $self->_is_mongos(1) if $master->{'msg'};
+
         # if this is a replica set & we haven't renewed the host list in 1 sec
         if ($master->{'hosts'} && time() > $self->ts) {
             # update (or set) rs list
@@ -401,6 +445,61 @@ sub get_master {
     return -1;
 }
 
+
+sub read_preference {
+    my ($self, $mode, $tagsets) = @_;
+
+    die "Missing read preference mode\n" if @_ < 2;
+    die "Unrecognized read preference mode: $mode\n" if $mode < 0 || $mode > 4;
+    die "NEAREST read preference mode not supported\n" if $mode == MongoDB::MongoClient->NEAREST;
+
+    if ($self->_readpref_mode != $mode || $self->_readpref_tagsets != $tagsets) {
+        $self->_readpref_mode($mode);
+        $self->clear__readpref_tagsets() if !(defined $tagsets);
+        $self->_repin();
+    }
+}
+
+
+sub _ping {
+    my ($self) = @_;
+    return $self->get_database('admin')->run_command({ping => 1});
+}
+
+
+sub _repin {
+    my ($self) = @_;
+    my $mode = $self->_readpref_mode;
+
+    if ($self->_is_mongos) {
+        $self->_readpref_pinned($self->_master);
+        return;
+    }
+
+    my $primary = $self->_master->host;
+    my %servers = %{$self->_servers};
+
+    # TODO actual selection logic
+    if ($mode == MongoDB::MongoClient->PRIMARY) {
+        $self->_readpref_pinned($self->_master);
+    }
+    elsif ($mode == MongoDB::MongoClient->SECONDARY) {
+        print "secondary\n";
+        delete $servers{$primary};
+        my @secondaries = keys %servers;
+        my $pin_server = $servers{$secondaries[int(rand(scalar @secondaries))]};
+        $self->_readpref_pinned($pin_server);
+    }
+    elsif ($mode == MongoDB::MongoClient->PRIMARY_PREFERRED) {
+        print "primary_preferred\n";
+    }
+    elsif ($mode == MongoDB::MongoClient->SECONDARY_PREFERRED) {
+        print "secondary_preferred\n";
+    }
+    else {
+        die "TODO: fix this";
+    }
+}
 
 sub authenticate {
     my ($self, $dbname, $username, $password, $is_digest) = @_;
