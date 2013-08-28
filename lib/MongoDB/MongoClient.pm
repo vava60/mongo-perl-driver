@@ -455,12 +455,17 @@ sub read_preference {
     die "Read preference must be used with a replica set" if !$self->find_master || keys %{$self->_servers} < 2;
     die "PRIMARY cannot be combined with tags" if $mode == MongoDB::MongoClient->PRIMARY && $tagsets;
 
+    # only repin if mode or tagsets have changed
+    return if $mode == $self->_readpref_mode &&
+              defined $self->_readpref_tagsets &&
+              defined $tagsets &&
+              $tagsets == $self->_readpref_tagsets;
+
     $self->_readpref_mode($mode);
 
     $self->_readpref_tagsets($tagsets) if defined $tagsets;
     $self->_readpref_tagsets([]) if !(defined $tagsets);
 
-    # TODO: only repin when mode or tagsets change
     $self->_repin();
 }
 
